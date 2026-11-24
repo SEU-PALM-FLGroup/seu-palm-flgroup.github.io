@@ -23,6 +23,8 @@ COOKIE = 'lab_preview_session'
 SESSION_SECONDS = 30 * 60
 LOGIN_PAGE = '/#login'
 MAX_FORM_BYTES = 4096
+TEAM_NAME = 'Secure & Trustworthy Agents (STAGE)'
+TEAM_NAME_HTML = '<strong>S</strong>ecure &amp; <strong>T</strong>rustworthy <strong>Age</strong>nts (STAGE)'
 LOGOUT_FORM = ('<form method="post" action="/logout">'
                '<button class="logout-button" type="submit">退出登录</button>'
                '</form>').encode('utf-8')
@@ -42,13 +44,16 @@ def authenticated_homepage(site, documents, role):
     overrides = (
         ('<!-- LAB_HEAD -->', '<meta name="robots" content="noindex, nofollow">\n  <script src="search.js" defer></script>'),
         ('<a class="lab-nav-link" href="#login">组内登录</a>', '<a class="lab-nav-link" href="#lab-resources">组内资料</a>'),
-        ('<title>冯磊课题组</title>', '<title>冯磊课题组 · 组内资料</title>'),
+        ('</title>', ' · 组内资料</title>'),
         ('<template id="lab-resources">', '<div id="lab-resources">'),
         ('</template><!-- LAB_RESOURCES_END -->', '</div>'),
     )
     for placeholder, content in overrides:
         site = site.replace(placeholder.encode('utf-8'), content.encode('utf-8'), 1)
     site = site.replace(b'<!-- AUTH_FORM -->', b'<div class="account-controls">' + controls + b'</div>', 1)
+    team_name = f'<span class="team-name" lang="en">{TEAM_NAME_HTML}</span>'.encode('utf-8')
+    former_name = '冯磊课题组'.encode('utf-8')
+    documents = re.sub(rb'(?:SEU-PALM )?' + former_name, team_name, documents)
     return site.replace(b'<!-- LAB_DOCUMENTS -->', documents, 1)
 
 
@@ -68,7 +73,7 @@ def login_section(notice):
     <form method="post" action="/login" class="login-form">
       <label for="name">姓名</label>
       <input id="name" name="name" autocomplete="username" maxlength="40" required>
-      <label for="credential">一卡通号或管理员密码</label>
+      <label for="credential">密码</label>
       <input id="credential" name="credential" type="password" autocomplete="current-password" maxlength="128" required>
       <button type="submit">登录</button>
       <p class="login-notice" role="status">{escape(notice)}</p>
@@ -105,13 +110,13 @@ def admin_page(students):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>组员账号管理 · 冯磊课题组</title>
+  <title>组员账号管理 · {escape(TEAM_NAME)}</title>
   <link rel="stylesheet" href="/site.css">
 </head>
 <body>
   <header class="site-header">
     <div class="wrap header-inner">
-      <a href="/" class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">冯磊课题组</span></a>
+      <a href="/" class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name team-name" lang="en">{TEAM_NAME_HTML}</span></a>
       {LOGOUT_FORM.decode('utf-8')}
     </div>
   </header>

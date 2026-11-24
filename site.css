@@ -91,9 +91,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-vis
   transform: rotate(45deg);
 }
 
-.brand-name, .brand-subtitle { display: block; line-height: 1.25; }
-.brand-name { font-size: 1.02rem; font-weight: 760; }
-.brand-subtitle { margin-top: .14rem; color: var(--muted); font-size: .875rem; }
+.brand-name { font-size: 1.02rem; line-height: 1.25; }
+.team-name { font-weight: 500; }
+.team-name strong { font-weight: 750; }
 
 .site-nav, .site-nav ul {
   display: flex;
@@ -134,31 +134,26 @@ a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-vis
 
 .hero-copy { z-index: 1; padding: clamp(1.6rem, 4.6vw, 4.15rem); }
 
-.hero .eyebrow {
-  display: block;
-  margin: 0 0 .75rem;
-  color: #9be1d4;
-  font-size: .9rem;
-  font-weight: 700;
-  letter-spacing: .065em;
-  line-height: 1.35;
-}
-
 .hero h1 {
   margin: 0;
   font-size: clamp(2.1rem, 5vw, 4.35rem);
-  font-weight: 760;
   letter-spacing: -.015em;
   line-height: 1.12;
   overflow-wrap: anywhere;
 }
 
-.hero-copy > p:not(.eyebrow) {
+.hero-copy > p {
   max-width: 39rem;
   margin: 1.05rem 0 0;
   color: #d6e8f2;
   font-size: 1.05rem;
   line-height: 1.75;
+}
+
+.hero-copy > .hero-team-name {
+  margin-top: .65rem;
+  font-size: clamp(1rem, 2.6vw, 1.45rem);
+  line-height: 1.4;
 }
 
 .hero-link {
