@@ -38,7 +38,7 @@ def replace_login_section(site, section):
     return site[:start] + section + site[end:]
 
 
-def authenticated_homepage(site, documents, role):
+def authenticated_homepage(site, documents, role, watermark=None):
     site = replace_login_section(site, b'')
     controls = ADMIN_LINK + LOGOUT_FORM if role == 'admin' else LOGOUT_FORM
     overrides = (
@@ -51,6 +51,10 @@ def authenticated_homepage(site, documents, role):
     for placeholder, content in overrides:
         site = site.replace(placeholder.encode('utf-8'), content.encode('utf-8'), 1)
     site = site.replace(b'<!-- AUTH_FORM -->', b'<div class="account-controls">' + controls + b'</div>', 1)
+    if watermark:
+        labels = f'<span>{escape(watermark)}</span>' * 30
+        layer = f'<div class="member-watermark" aria-hidden="true">{labels}</div>\n'.encode('utf-8')
+        site = site.replace(b'</body>', layer + b'</body>', 1)
     team_name = f'<span class="team-name" lang="en">{TEAM_NAME_HTML}</span>'.encode('utf-8')
     former_name = '冯磊课题组'.encode('utf-8')
     documents = re.sub(rb'(?:SEU-PALM )?' + former_name, team_name, documents)
@@ -62,6 +66,7 @@ class Session:
     role: str
     student_key: bytes | None
     expires_at: float
+    watermark: str | None = None
 
 
 def login_section(notice):
@@ -199,7 +204,7 @@ class LabSite:
     def homepage(self, session=None, status=HTTPStatus.OK, notice='', extra=()):
         site = (ROOT / 'index.html').read_bytes()
         if session:
-            site = authenticated_homepage(site, self.documents, session.role)
+            site = authenticated_homepage(site, self.documents, session.role, session.watermark)
         else:
             site = replace_login_section(site, login_section(notice))
         return self.answer(status, site, extra=extra)
@@ -333,15 +338,20 @@ class LabSite:
 
         role = None
         student_key = None
+        watermark = None
+        card_number = credential.strip()
         if 0 < len(name) <= 40 and 0 < len(credential) <= 128:
             if self.accounts.verify_admin(name, credential):
                 role = 'admin'
-            elif re.fullmatch(r'[0-9]{1,24}', credential.strip()):
-                student_key = self.accounts.student_key(name, credential.strip())
+            elif re.fullmatch(r'[0-9]{1,24}', card_number):
+                student_key = self.accounts.student_key(name, card_number)
 
         with self.state_lock:
             if student_key is not None and self.accounts.student_enabled(student_key):
                 role = 'student'
+                watermark = name
+                if len(card_number) >= 7:
+                    watermark += f' · 一卡通尾号 {card_number[-2:]}'
             if role is None:
                 return self.homepage(status=HTTPStatus.UNAUTHORIZED, notice='姓名或登录凭据不匹配。')
             now = monotonic()
@@ -350,7 +360,7 @@ class LabSite:
                 del self.sessions[token]
             self.sessions.pop(self.token(environ), None)
             token = secrets.token_urlsafe(32)
-            self.sessions[token] = Session(role, student_key, now + SESSION_SECONDS)
+            self.sessions[token] = Session(role, student_key, now + SESSION_SECONDS, watermark)
         return self.answer(HTTPStatus.SEE_OTHER, redirect='/admin' if role == 'admin' else '/', cookie=token)
 
 
