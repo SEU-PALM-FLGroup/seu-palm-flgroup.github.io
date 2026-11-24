@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="The organization website of SEU-PALM-FLGroup.">
+  <title>SEU-PALM-FLGroup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #edf0f8;
+      color: #192242;
+      font-synthesis: none;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; }
+    a { color: inherit; }
+    a:focus-visible { outline: 3px solid #6154df; outline-offset: 5px; }
+    .shell { width: min(100% - 2rem, 72rem); margin-inline: auto; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-block: 1.45rem;
+      font-weight: 650;
+    }
+    .mark { display: inline-flex; align-items: center; gap: .65rem; }
+    .mark::before {
+      content: "";
+      width: .85rem;
+      height: .85rem;
+      border: .26rem solid #4336a8;
+      border-radius: .25rem;
+      transform: rotate(45deg);
+    }
+    .topbar a { text-underline-offset: .24em; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+      background: #fff;
+      min-height: 28rem;
+      border: 1px solid #d4dbea;
+      border-radius: 1.5rem;
+      overflow: hidden;
+    }
+    .intro {
+      align-self: center;
+      padding: clamp(1.5rem, 5vw, 4.5rem);
+    }
+    h1 {
+      font-size: clamp(2rem, 5.2vw, 4.35rem);
+      line-height: 1.02;
+      letter-spacing: -.055em;
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+    .intro p {
+      margin: 1.25rem 0 1.85rem;
+      color: #485574;
+      font-size: clamp(1rem, 2vw, 1.23rem);
+      line-height: 1.65;
+    }
+    .button {
+      display: inline-flex;
+      padding: .78rem 1.15rem;
+      border-radius: .65rem;
+      background: #393089;
+      color: #fff;
+      font-weight: 650;
+      text-decoration: none;
+    }
+    .button:hover { background: #26216b; }
+    .art {
+      position: relative;
+      min-height: 12rem;
+      overflow: hidden;
+      background: radial-gradient(ellipse at 82% 75%, #3e4ca6, transparent 65%), #191c51;
+    }
+    .art::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      opacity: .5;
+      background: radial-gradient(circle, #9caaf3 1px, transparent 1.5px) 5px 5px / 22px 22px;
+    }
+    .rings {
+      position: absolute;
+      width: clamp(10rem, 23vw, 20rem);
+      aspect-ratio: 1;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(28deg);
+    }
+    .rings i {
+      position: absolute;
+      inset: 0;
+      border: 1px solid #acbaff;
+      border-radius: 34%;
+    }
+    .rings i:nth-child(2) { inset: 12%; transform: rotate(25deg); }
+    .rings i:nth-child(3) { inset: 24%; transform: rotate(50deg); border-color: #c5dcfa; }
+    .rings i:nth-child(4) {
+      inset: 41%;
+      background: #dcec9c;
+      border: 0;
+      box-shadow: 0 0 2.6rem #dcec9c66;
+    }
+    .lab {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .25rem 1.5rem;
+      align-items: baseline;
+      margin-block: 1.35rem 2.5rem;
+      padding: 1rem .2rem;
+      border-bottom: 1px solid #cdd5e6;
+    }
+    .lab a { font-weight: 650; text-underline-offset: .22em; }
+    .lab span { color: #485574; }
+    @media (max-width: 42rem) {
+      .hero { grid-template-columns: 1fr; }
+      .intro { padding-block: 2.5rem; }
+      .topbar { padding-block: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell topbar">
+    <span class="mark">SEU-PALM-FLGroup</span>
+    <a href="https://github.com/SEU-PALM-FLGroup">GitHub</a>
+  </header>
+  <main class="shell">
+    <section class="hero" aria-labelledby="title">
+      <div class="intro">
+        <h1 id="title">SEU-PALM-<wbr>FLGroup</h1>
+        <p>Explore the group's public repositories on GitHub.</p>
+        <a class="button" href="https://github.com/orgs/SEU-PALM-FLGroup/repositories">Browse repositories</a>
+      </div>
+      <div class="art" aria-hidden="true">
+        <div class="rings"><i></i><i></i><i></i><i></i></div>
+      </div>
+    </section>
+    <aside class="lab" aria-label="Lab website">
+      <a href="https://palm.seu.edu.cn/intro.html">PALM Lab</a>
+      <span>Southeast University</span>
+    </aside>
+  </main>
+</body>
+</html>
