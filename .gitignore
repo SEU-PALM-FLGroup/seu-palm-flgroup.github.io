@@ -1,0 +1,7 @@
+# Generated lab documents and local account database.
+/.lab-data/
+/local-preview/
+
+# Python bytecode.
+__pycache__/
+*.py[cod]
