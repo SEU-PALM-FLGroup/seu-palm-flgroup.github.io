@@ -3,9 +3,10 @@ from collections import Counter
 from html import escape, unescape
 from pathlib import Path
 import re
-from tempfile import NamedTemporaryFile
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
+
+from lab_accounts import Accounts
 
 
 W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
@@ -117,12 +118,30 @@ def list_styles(numbering):
     }
 
 
+def read_roster_table(table, roster):
+    rows = iter(table.findall(W + 'tr'))
+    header = next(rows, None)
+    columns = [] if header is None else header.findall(W + 'tc')
+    if len(columns) < 2 or '一卡通' not in text_of(columns[0]) or '姓名' not in text_of(columns[1]):
+        raise ValueError('The member tables must begin with card number and name columns.')
+    for row in rows:
+        cells = row.findall(W + 'tc')
+        if len(cells) != len(columns):
+            raise ValueError('The member roster contains a row with missing or extra columns.')
+        card_number, name = (text_of(cell).strip() for cell in cells[:2])
+        if not name or name in roster:
+            raise ValueError('The member roster contains a missing or duplicate name.')
+        roster[name] = card_number if re.fullmatch(r'[0-9]{1,24}', card_number) else None
+
+
 def render_table(table, document_id, position, label, metrics):
     html_rows = []
     for row_index, row in enumerate(table.findall(W + 'tr')):
         cells = []
         for column_index, cell in enumerate(row.findall(W + 'tc')):
             assert not any(node.tag in (W + 'gridSpan', W + 'vMerge', W + 'tbl') for node in cell.iter())
+            if document_id == 'members' and column_index == 0:
+                continue
             paragraph_html = []
             for paragraph_index, paragraph in enumerate(cell.findall(W + 'p')):
                 key = f'{document_id}-{position}-{row_index}-{column_index}-{paragraph_index}'
@@ -146,8 +165,8 @@ def render_table(table, document_id, position, label, metrics):
     )
 
 
-def render_document(document_id, config, source_dir):
-    with ZipFile(source_dir / config['file']) as package:
+def render_document(document_id, config, source_path, roster=None):
+    with ZipFile(source_path) as package:
         body = ET.fromstring(package.read('word/document.xml')).find(W + 'body')
         numbering = list_styles(ET.fromstring(package.read('word/numbering.xml')))
 
@@ -174,6 +193,8 @@ def render_document(document_id, config, source_dir):
             current_list = next_list
 
         if element.tag == W + 'tbl':
+            if roster is not None:
+                read_roster_table(element, roster)
             content.append(render_table(element, document_id, index, config['tables'][index], metrics))
             continue
         assert element.tag == W + 'p'
@@ -219,11 +240,13 @@ def table_of_contents():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Build the private lab document fragment from Word files.')
+    parser = argparse.ArgumentParser(description='Import private lab documents and member accounts from Word files.')
     parser.add_argument('--source-dir', type=Path, default=DEFAULT_SOURCE_DIR,
                         help='directory containing the three original Word files')
+    parser.add_argument('--roster-file', type=Path,
+                        help='replacement for the member roster Word file in --source-dir')
     parser.add_argument('--data-dir', type=Path, default=DEFAULT_DATA_DIR,
-                        help='private output directory (default: .lab-data in this repository)')
+                        help='private SQLite storage directory (default: .lab-data in this repository)')
     args = parser.parse_args()
     source_dir = args.source_dir.resolve()
     data_dir = args.data_dir.resolve()
@@ -231,11 +254,17 @@ def main():
         parser.error('--data-dir must be inside .lab-data or outside this repository')
 
     rendered = []
+    roster = {}
     for key, config in SOURCES.items():
-        source_path = source_dir / config['file']
+        source_path = args.roster_file if key == 'members' and args.roster_file else source_dir / config['file']
         if not source_path.is_file():
             parser.error(f'missing source document: {source_path}')
-        article, metrics = render_document(key, config, source_dir)
+        try:
+            article, metrics = render_document(key, config, source_path, roster if key == 'members' else None)
+        except ValueError as error:
+            parser.error(str(error))
+        if key == 'members' and (not roster or metrics['tables'] != len(config['tables'])):
+            parser.error('Could not load both member tables from the roster Word file.')
         rendered.append(article)
         print(f'{key}: {dict(metrics)}')
 
@@ -255,16 +284,9 @@ def main():
     ])
 
     data_dir.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(mode='w', encoding='utf-8', newline='\n', dir=data_dir,
-                            prefix='.documents-', suffix='.tmp', delete=False) as output:
-        temporary_path = Path(output.name)
-        try:
-            output.write(fragment)
-            output.close()
-            temporary_path.replace(data_dir / 'documents.html')
-        finally:
-            temporary_path.unlink(missing_ok=True)
-    print('Private document fragment generated.')
+    Accounts(data_dir / 'lab_accounts.sqlite3').sync_roster(roster, fragment.encode('utf-8'))
+    missing = sum(card_number is None for card_number in roster.values())
+    print(f'Private resources imported for {len(roster)} members ({missing} card numbers missing from Word).')
 
 
 if __name__ == '__main__':

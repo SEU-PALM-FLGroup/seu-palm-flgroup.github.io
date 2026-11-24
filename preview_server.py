@@ -1,18 +1,18 @@
 import argparse
 from collections import deque
+from contextlib import closing
 from dataclasses import dataclass
 from getpass import getpass
 from html import escape
-from html.parser import HTMLParser
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
 import secrets
 from threading import Lock
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
+from wsgiref.simple_server import WSGIRequestHandler, make_server
 
 from lab_accounts import Accounts
 
@@ -21,11 +21,8 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA = ROOT / '.lab-data'
 COOKIE = 'lab_preview_session'
 SESSION_SECONDS = 30 * 60
-SESSIONS = {}
-LOGIN_ROLES = {'/login': 'student', '/admin/login': 'admin'}
-LOGIN_PAGES = {'student': '/#login', 'admin': '/?role=admin#login'}
-FAILED_ATTEMPTS = {role: deque() for role in LOGIN_ROLES.values()}
-STATE_LOCK = Lock()
+LOGIN_PAGE = '/#login'
+MAX_FORM_BYTES = 4096
 LOGOUT_FORM = ('<form method="post" action="/logout">'
                '<button class="logout-button" type="submit">退出登录</button>'
                '</form>').encode('utf-8')
@@ -62,71 +59,19 @@ class Session:
     expires_at: float
 
 
-class RosterReader(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.roster_tables = 0
-        self.collecting = False
-        self.in_body = False
-        self.cell = None
-        self.row = []
-        self.members = {}
-
-    def handle_starttag(self, tag, attrs):
-        if tag == 'table' and dict(attrs).get('class') == 'members-table':
-            self.roster_tables += 1
-            self.collecting = True
-        if self.collecting and tag == 'tbody':
-            self.in_body = True
-        if self.collecting and tag == 'tr':
-            self.row = []
-        if self.collecting and tag in {'td', 'th'}:
-            self.cell = []
-
-    def handle_data(self, data):
-        if self.cell is not None:
-            self.cell.append(data)
-
-    def handle_endtag(self, tag):
-        if self.collecting and tag in {'td', 'th'}:
-            self.row.append(''.join(self.cell).strip())
-            self.cell = None
-        if self.collecting and self.in_body and tag == 'tr' and len(self.row) >= 2:
-            number, name = self.row[:2]
-            if not name or name in self.members:
-                raise ValueError('The member roster contains a missing or duplicate name.')
-            self.members[name] = number if re.fullmatch(r'[0-9]{1,24}', number) else None
-        if tag == 'tbody':
-            self.in_body = False
-        if tag == 'table':
-            self.collecting = False
-
-
-def login_section(role, notice):
-    admin = role == 'admin'
-    title = '管理员登录' if admin else '组员登录'
-    description = '登录后可管理组员账号和查阅组内资料。' if admin else '使用登记的姓名和一卡通号访问组内资料。'
-    alternative = 'student' if admin else 'admin'
-    alternative_title = '切换到组员登录' if admin else '切换到管理员登录'
-    field = (
-        '<label for="password">密码</label>'
-        '<input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>'
-        if admin else
-        '<label for="card">一卡通号</label>'
-        '<input id="card" name="card" type="password" inputmode="numeric" autocomplete="current-password" pattern="[0-9]+" maxlength="24" required>'
-    )
+def login_section(notice):
     return f'''<section class="login-section login-section-active wrap" id="login" aria-labelledby="login-title">
     <div class="login-context">
-      <h2 id="login-title">{title}</h2>
-      <p>{description}</p>
-      <a class="login-alternative" href="{LOGIN_PAGES[alternative]}">{alternative_title}</a>
+      <h2 id="login-title">组内登录</h2>
+      <p>组员使用登记的姓名和一卡通号，管理员使用姓名和管理密码。</p>
     </div>
-    <form method="post" action="{LOGIN_PAGES[role]}" class="login-form">
+    <form method="post" action="/login" class="login-form">
       <label for="name">姓名</label>
       <input id="name" name="name" autocomplete="username" maxlength="40" required>
-      {field}
+      <label for="credential">一卡通号或管理员密码</label>
+      <input id="credential" name="credential" type="password" autocomplete="current-password" maxlength="128" required>
       <button type="submit">登录</button>
-      <p class="login-notice" role="status">{notice}</p>
+      <p class="login-notice" role="status">{escape(notice)}</p>
     </form>
   </section>'''.encode('utf-8')
 
@@ -186,235 +131,300 @@ def admin_page(students):
 </html>'''.encode('utf-8')
 
 
-class PreviewHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        pass
 
-    def answer(self, status, content=b'', content_type='text/html', redirect=None, cookie=None):
-        self.send_response(status)
-        self.send_header('Content-Type', f'{content_type}; charset=utf-8')
-        self.send_header('Content-Length', str(len(content)))
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Referrer-Policy', 'same-origin')
-        self.send_header('Content-Security-Policy', "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+class LabSite:
+    def __init__(self, accounts, documents, origin):
+        self.accounts = accounts
+        self.documents = documents
+        self.origin = origin
+        self.host = urlsplit(origin).netloc
+        self.secure = origin.startswith('https://')
+        self.sessions = {}
+        self.attempts = {}
+        self.purge_attempts_at = 0
+        self.state_lock = Lock()
+
+    def __call__(self, environ, start_response):
+        status, content, headers = self.dispatch(environ)
+        headers.append(('Content-Length', str(len(content))))
+        if self.secure:
+            headers.append(('Strict-Transport-Security', 'max-age=31536000'))
+        start_response(f'{status.value} {status.phrase}', headers)
+        return [b'' if environ['REQUEST_METHOD'] == 'HEAD' else content]
+
+    def answer(self, status, content=b'', content_type='text/html', redirect=None, cookie=None, extra=()):
+        headers = [
+            ('Content-Type', f'{content_type}; charset=utf-8'),
+            ('Cache-Control', 'no-store'),
+            ('X-Content-Type-Options', 'nosniff'),
+            ('Referrer-Policy', 'same-origin'),
+            ('Content-Security-Policy', "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+            *extra,
+        ]
         if redirect:
-            self.send_header('Location', redirect)
+            headers.append(('Location', redirect))
         if cookie is not None:
             max_age = SESSION_SECONDS if cookie else 0
-            self.send_header('Set-Cookie', f'{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}')
-        self.end_headers()
-        if self.command != 'HEAD':
-            self.wfile.write(content)
+            secure = '; Secure' if self.secure else ''
+            headers.append(('Set-Cookie', f'{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'))
+        return status, content, headers
 
-    def safe_host(self):
-        return self.headers.get('Host') == f'127.0.0.1:{self.server.server_port}'
-
-    def token(self):
+    @staticmethod
+    def token(environ):
         jar = SimpleCookie()
         try:
-            jar.load(self.headers.get('Cookie', ''))
+            jar.load(environ.get('HTTP_COOKIE', ''))
         except CookieError:
             return ''
         return jar[COOKIE].value if COOKIE in jar else ''
 
-    def current_session(self):
-        token = self.token()
-        with STATE_LOCK:
-            session = SESSIONS.get(token)
+    def current_session(self, environ):
+        token = self.token(environ)
+        with self.state_lock:
+            session = self.sessions.get(token)
             if not session:
                 return None
             if session.expires_at <= monotonic() or (
-                session.role == 'student' and not self.server.accounts.student_enabled(session.student_key)
+                session.role == 'student' and not self.accounts.student_enabled(session.student_key)
             ):
-                SESSIONS.pop(token, None)
+                self.sessions.pop(token, None)
                 return None
             return session
 
-    def homepage(self, session=None, role='student', status=HTTPStatus.OK, notice=''):
+    def homepage(self, session=None, status=HTTPStatus.OK, notice='', extra=()):
         site = (ROOT / 'index.html').read_bytes()
         if session:
-            site = authenticated_homepage(site, self.server.documents, session.role)
+            site = authenticated_homepage(site, self.documents, session.role)
         else:
-            site = replace_login_section(site, login_section(role, notice))
-        return self.answer(status, site)
+            site = replace_login_section(site, login_section(notice))
+        return self.answer(status, site, extra=extra)
 
-    def do_GET(self):
-        if not self.safe_host():
+    def dispatch(self, environ):
+        if environ.get('HTTP_HOST', '').lower() != self.host or (self.secure and environ['wsgi.url_scheme'] != 'https'):
             return self.answer(HTTPStatus.BAD_REQUEST)
-        url = urlsplit(self.path)
-        path = url.path
+        method = environ['REQUEST_METHOD']
+        if method in {'GET', 'HEAD'}:
+            return self.get(environ)
+        if method == 'POST':
+            return self.post(environ)
+        return self.answer(HTTPStatus.METHOD_NOT_ALLOWED, extra=(('Allow', 'GET, HEAD, POST'),))
+
+    def get(self, environ):
+        path = environ['PATH_INFO']
         if path == '/site.css':
             return self.answer(HTTPStatus.OK, (ROOT / 'site.css').read_bytes(), 'text/css')
         if path == '/index.html':
             return self.answer(HTTPStatus.SEE_OTHER, redirect='/')
-        if path not in {'/', '/search.js', '/admin', *LOGIN_ROLES}:
+        if path in {'/login', '/admin/login'}:
+            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGE)
+        if path not in {'/', '/search.js', '/admin'}:
             return self.answer(HTTPStatus.NOT_FOUND)
-        session = self.current_session()
-        if path in LOGIN_ROLES:
-            role = LOGIN_ROLES[path]
-            if session and session.role == role:
-                destination = '/admin' if role == 'admin' else '/'
-                return self.answer(HTTPStatus.SEE_OTHER, redirect=destination)
-            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES[role])
-        if path == '/admin':
-            if not session:
-                return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES['admin'])
-            if session.role != 'admin':
-                return self.answer(HTTPStatus.FORBIDDEN)
-            return self.answer(HTTPStatus.OK, admin_page(self.server.accounts.students()))
+        session = self.current_session(environ)
         if path == '/':
-            if url.query == 'role=admin':
-                if session and session.role == 'admin':
-                    return self.answer(HTTPStatus.SEE_OTHER, redirect='/admin')
-                return self.homepage(role='admin')
             return self.homepage(session)
         if not session:
-            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES['student'])
+            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGE)
+        if path == '/admin':
+            if session.role != 'admin':
+                return self.answer(HTTPStatus.FORBIDDEN)
+            return self.answer(HTTPStatus.OK, admin_page(self.accounts.students()))
         return self.answer(HTTPStatus.OK, (ROOT / 'search.js').read_bytes(), 'text/javascript')
 
-    do_HEAD = do_GET
-
-    def do_POST(self):
-        origin = f'http://127.0.0.1:{self.server.server_port}'
-        if not self.safe_host() or self.headers.get('Origin') != origin:
+    def post(self, environ):
+        if environ.get('HTTP_ORIGIN') != self.origin:
             return self.answer(HTTPStatus.FORBIDDEN)
-        url = urlsplit(self.path)
-        path = url.path
+        path = environ['PATH_INFO']
         if path == '/logout':
-            with STATE_LOCK:
-                SESSIONS.pop(self.token(), None)
-            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES['student'], cookie='')
-        if path not in {'/', '/admin/students', *LOGIN_ROLES}:
+            with self.state_lock:
+                self.sessions.pop(self.token(environ), None)
+            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGE, cookie='')
+        if path not in {'/login', '/admin/students'}:
             return self.answer(HTTPStatus.NOT_FOUND)
-        size = self.headers.get('Content-Length', '')
-        if not size.isascii() or not size.isdecimal() or len(size) > 4 or not 0 < int(size) <= 1024:
+        size = environ.get('CONTENT_LENGTH') or ''
+        if not re.fullmatch(r'[0-9]{1,4}', size) or not 0 < int(size) <= MAX_FORM_BYTES:
             return self.answer(HTTPStatus.BAD_REQUEST)
-        if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
+        content_type = environ.get('CONTENT_TYPE', '').partition(';')[0].strip().lower()
+        if content_type != 'application/x-www-form-urlencoded':
             return self.answer(HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
         try:
-            fields = parse_qs(self.rfile.read(int(size)).decode('ascii'), max_num_fields=4, errors='strict')
+            body = environ['wsgi.input'].read(int(size)).decode('ascii')
+            values = parse_qs(body, max_num_fields=4, keep_blank_values=True, errors='strict')
+            if any(len(items) != 1 for items in values.values()):
+                return self.answer(HTTPStatus.BAD_REQUEST)
+            fields = {name: items[0] for name, items in values.items()}
         except (ValueError, UnicodeError):
             return self.answer(HTTPStatus.BAD_REQUEST)
         if path == '/admin/students':
-            return self.change_student_access(fields)
-        if path == '/':
-            return self.login('admin' if url.query == 'role=admin' else 'student', fields)
-        return self.login(LOGIN_ROLES[path], fields)
+            return self.change_student_access(environ, fields)
+        return self.login(environ, fields)
 
-    def change_student_access(self, fields):
-        session = self.current_session()
+    def change_student_access(self, environ, fields):
+        session = self.current_session(environ)
         if not session or session.role != 'admin':
             return self.answer(HTTPStatus.FORBIDDEN)
-        account = fields.get('account', [''])[0]
-        enabled = fields.get('enabled', [''])[0]
-        number = fields.get('card', [''])[0].strip()
+        account = fields.get('account', '')
+        enabled = fields.get('enabled', '')
+        number = fields.get('card', '').strip()
         if not re.fullmatch(r'[a-f0-9]{64}', account):
             return self.answer(HTTPStatus.BAD_REQUEST)
         key = bytes.fromhex(account)
-        with STATE_LOCK:
+        with self.state_lock:
             if 'card' in fields and 'enabled' not in fields and re.fullmatch(r'[0-9]{1,24}', number):
-                changed = self.server.accounts.fill_student_card(key, number)
+                changed = self.accounts.fill_student_card(key, number)
                 revoke = True
             elif 'card' not in fields and enabled in {'0', '1'}:
-                changed = self.server.accounts.change_student_access(key, int(enabled))
+                changed = self.accounts.change_student_access(key, int(enabled))
                 revoke = enabled == '0'
             else:
-                changed = None
-                revoke = False
+                return self.answer(HTTPStatus.BAD_REQUEST)
             if changed and revoke:
-                for token in [token for token, session in SESSIONS.items() if session.student_key == key]:
-                    del SESSIONS[token]
-        if changed is None:
-            return self.answer(HTTPStatus.BAD_REQUEST)
+                obsolete = [token for token, session in self.sessions.items() if session.student_key == key]
+                for token in obsolete:
+                    del self.sessions[token]
         if not changed:
             return self.answer(HTTPStatus.NOT_FOUND)
         return self.answer(HTTPStatus.SEE_OTHER, redirect='/admin')
 
-    def login(self, role, fields):
-        name = fields.get('name', [''])[0].strip()
-        attempts = FAILED_ATTEMPTS[role]
-        status = HTTPStatus.SEE_OTHER
-        notice = ''
-        token = None
+    def allow_login(self, ip, name):
+        now = monotonic()
+        with self.state_lock:
+            if now >= self.purge_attempts_at:
+                self.attempts = {
+                    key: queue for key, queue in self.attempts.items()
+                    if queue and queue[-1] > now - key[2]
+                }
+                self.purge_attempts_at = now + 60
+
+            queues = []
+            for scope, value, window, limit in (
+                ('site', '', 60, 240),
+                ('ip', ip, 60, 12),
+                ('name', name, 300, 12),
+            ):
+                key = (scope, value, window)
+                queue = self.attempts.get(key)
+                if queue is None:
+                    queue = deque()
+                while queue and queue[0] <= now - window:
+                    queue.popleft()
+                if len(queue) >= limit:
+                    return False, max(1, int(queue[0] + window - now) + 1)
+                queues.append((key, queue))
+            for key, queue in queues:
+                self.attempts[key] = queue
+                queue.append(now)
+        return True, 0
+
+    def login(self, environ, fields):
+        name = fields.get('name', '').strip()
+        credential = fields.get('credential', '')
+        allowed, retry_after = self.allow_login(environ.get('REMOTE_ADDR', ''), name[:40])
+        if not allowed:
+            return self.homepage(
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                notice='尝试次数过多，请稍后再试。',
+                extra=(('Retry-After', str(retry_after)),),
+            )
+
+        role = None
         student_key = None
-        with STATE_LOCK:
+        if 0 < len(name) <= 40 and 0 < len(credential) <= 128:
+            if self.accounts.verify_admin(name, credential):
+                role = 'admin'
+            elif re.fullmatch(r'[0-9]{1,24}', credential.strip()):
+                student_key = self.accounts.student_key(name, credential.strip())
+
+        with self.state_lock:
+            if student_key is not None and self.accounts.student_enabled(student_key):
+                role = 'student'
+            if role is None:
+                return self.homepage(status=HTTPStatus.UNAUTHORIZED, notice='姓名或登录凭据不匹配。')
             now = monotonic()
-            while attempts and attempts[0] <= now - 60:
-                attempts.popleft()
-            if len(attempts) >= 8:
-                status, notice = HTTPStatus.TOO_MANY_REQUESTS, '尝试次数过多，请稍后再试。'
-            else:
-                if role == 'admin':
-                    password = fields.get('password', [''])[0]
-                    valid = 0 < len(name) <= 40 and 0 < len(password) <= 128 and self.server.accounts.verify_admin(name, password)
-                    failure = '姓名或密码不匹配。'
-                else:
-                    number = fields.get('card', [''])[0].strip()
-                    if 0 < len(name) <= 40 and re.fullmatch(r'[0-9]{1,24}', number):
-                        student_key = self.server.accounts.student_key(name, number)
-                    valid = student_key is not None and self.server.accounts.student_enabled(student_key)
-                    failure = '姓名或一卡通号不匹配。'
-                if not valid:
-                    attempts.append(now)
-                    status, notice = HTTPStatus.UNAUTHORIZED, failure
-                else:
-                    for old_token in [key for key, session in SESSIONS.items() if session.expires_at <= now]:
-                        del SESSIONS[old_token]
-                    SESSIONS.pop(self.token(), None)
-                    token = secrets.token_urlsafe(32)
-                    SESSIONS[token] = Session(role, student_key, now + SESSION_SECONDS)
-        if notice:
-            return self.homepage(role=role, status=status, notice=notice)
-        return self.answer(status, redirect='/admin' if role == 'admin' else '/', cookie=token)
+            expired = [token for token, session in self.sessions.items() if session.expires_at <= now]
+            for token in expired:
+                del self.sessions[token]
+            self.sessions.pop(self.token(environ), None)
+            token = secrets.token_urlsafe(32)
+            self.sessions[token] = Session(role, student_key, now + SESSION_SECONDS)
+        return self.answer(HTTPStatus.SEE_OTHER, redirect='/admin' if role == 'admin' else '/', cookie=token)
+
+
+class LocalRequestHandler(WSGIRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+
+def public_origin(value):
+    try:
+        url = urlsplit(value)
+        port = url.port
+    except ValueError as error:
+        raise argparse.ArgumentTypeError('Expected an HTTPS origin, such as https://lab.example.edu.') from error
+    if (url.scheme != 'https' or not re.fullmatch(r'[a-z0-9.-]+(?::[0-9]+)?', url.netloc, re.IGNORECASE)
+            or url.path not in {'', '/'} or url.query or url.fragment or port == 0):
+        raise argparse.ArgumentTypeError('Expected an HTTPS origin, such as https://lab.example.edu.')
+    suffix = f':{port}' if port not in {None, 443} else ''
+    return f'https://{url.hostname}{suffix}'
 
 
 def main():
-    cli = argparse.ArgumentParser(description='Serve the lab website preview on this computer only.')
+    cli = argparse.ArgumentParser(description='Serve the lab site locally or behind an HTTPS reverse proxy.')
     cli.add_argument('--port', default=8765, type=int)
-    cli.add_argument('--data-dir', default=DEFAULT_DATA, type=Path, help='Directory containing the generated documents and local account database')
+    cli.add_argument('--data-dir', default=DEFAULT_DATA, type=Path, help='Private directory containing the account database')
+    cli.add_argument('--public-origin', type=public_origin, help='HTTPS origin used by a local reverse proxy')
     cli.add_argument('--set-admin', metavar='NAME')
     args = cli.parse_args()
+    if not 0 <= args.port <= 65535 or (args.public_origin and not args.port):
+        cli.error('Choose an available TCP port.')
     data_dir = args.data_dir.resolve()
     if data_dir.is_relative_to(ROOT) and not data_dir.is_relative_to(DEFAULT_DATA):
         cli.error('--data-dir must be inside .lab-data or outside this repository.')
+    database = data_dir / 'lab_accounts.sqlite3'
     if args.set_admin:
         name = args.set_admin.strip()
         if not 0 < len(name) <= 40:
             cli.error('Administrator name must contain 1–40 characters.')
         password = getpass('Administrator password: ')
-        if not 6 <= len(password) <= 128:
-            cli.error('Administrator password must contain 6–128 characters.')
+        if not 12 <= len(password) <= 128 or not password.strip() or password.strip().isdecimal():
+            cli.error('Use 12–128 characters and a password other than a numeric card number.')
+        if password != getpass('Confirm administrator password: '):
+            cli.error('The passwords do not match.')
         data_dir.mkdir(parents=True, exist_ok=True)
-        accounts = Accounts(data_dir / 'lab_accounts.sqlite3')
-        accounts.set_admin(name, password)
-        if not accounts.verify_admin(name, password):
-            cli.error('Administrator verification failed.')
-        print('Administrator configured and verified.', flush=True)
+        Accounts(database).set_admin(name, password)
+        print('Administrator configured. Restart the site to end existing sessions.', flush=True)
         return
-    documents_file = data_dir / 'documents.html'
-    if not documents_file.is_file():
-        cli.error('Run build_lab_site.py to generate documents.html first.')
-    documents = documents_file.read_bytes()
-    roster = RosterReader()
-    try:
-        roster.feed(documents.decode('utf-8'))
-    except ValueError as error:
-        cli.error(str(error))
-    if roster.roster_tables != 2 or not roster.members:
-        cli.error('Could not load the member list from the local website.')
-    accounts = Accounts(data_dir / 'lab_accounts.sqlite3')
-    accounts.sync_roster(roster.members)
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), PreviewHandler)
-    server.accounts = accounts
-    server.documents = documents
-    print(f'Local site: http://127.0.0.1:{server.server_port}/ ({len(roster.members)} enrolled)', flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+
+    if not database.is_file():
+        cli.error('Run build_lab_site.py to import the private documents and roster first.')
+    accounts = Accounts(database)
+    documents = accounts.documents()
+    if not documents:
+        cli.error('Run build_lab_site.py to rebuild the private documents from the Word files.')
+    if args.public_origin:
+        try:
+            from waitress import serve
+        except ImportError:
+            cli.error('Install the dependencies with python -m pip install -r requirements.txt.')
+        print(f'Lab site: {args.public_origin}', flush=True)
+        serve(
+            LabSite(accounts, documents, args.public_origin),
+            host='127.0.0.1',
+            port=args.port,
+            trusted_proxy='127.0.0.1',
+            trusted_proxy_headers={'x-forwarded-for', 'x-forwarded-proto'},
+            max_request_header_size=16 * 1024,
+            max_request_body_size=MAX_FORM_BYTES,
+        )
+        return
+
+    with closing(make_server('127.0.0.1', args.port, None, handler_class=LocalRequestHandler)) as server:
+        origin = f'http://127.0.0.1:{server.server_port}'
+        server.set_app(LabSite(accounts, documents, origin))
+        print(f'Local site: {origin}/', flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == '__main__':

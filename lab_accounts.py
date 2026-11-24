@@ -42,16 +42,21 @@ class Accounts:
     def student_key(self, name, card_number):
         return digest(self.member_key, (name + '\0' + card_number).encode('utf-8'), 'sha256')
 
-    def sync_roster(self, roster):
+    def sync_roster(self, roster, documents=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            manual = {name: key for name, key in db.execute("SELECT name, account_key FROM students WHERE source = 'manual'")}
+            existing = {
+                name: (key, enabled, source)
+                for key, name, enabled, source in db.execute('SELECT account_key, name, enabled, source FROM students')
+            }
             students = []
             for name, number in roster.items():
+                key, enabled, source = existing.get(name, (None, 0, 'pending'))
                 if number is not None:
-                    students.append((self.student_key(name, number), name, 1, 'document'))
-                elif name in manual:
-                    students.append((manual[name], name, 1, 'manual'))
+                    active = 1 if source == 'pending' else enabled
+                    students.append((self.student_key(name, number), name, active, 'document'))
+                elif source == 'manual':
+                    students.append((key, name, enabled, 'manual'))
                 else:
                     pending_key = digest(self.member_key, ('pending\0' + name).encode('utf-8'), 'sha256')
                     students.append((pending_key, name, 0, 'pending'))
@@ -60,6 +65,14 @@ class Accounts:
             live_keys = {key for key, _, _, _ in students}
             obsolete = [(key,) for (key,) in db.execute('SELECT account_key FROM students') if key not in live_keys]
             db.executemany('DELETE FROM students WHERE account_key = ?', obsolete)
+            if documents is not None:
+                db.execute("INSERT INTO settings VALUES ('documents', ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                           (documents,))
+
+    def documents(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE name = 'documents'").fetchone()
+        return row[0] if row else None
 
     def student_enabled(self, account_key):
         with self.connect() as db:
@@ -100,8 +113,7 @@ class Accounts:
     def verify_admin(self, name, password):
         with self.connect() as db:
             account = db.execute('SELECT name, salt, password_hash FROM administrator WHERE id = 1').fetchone()
-        if account is None:
+        if account is None or account[0] != name:
             return False
-        admin_name, salt, stored_hash = account
-        matches = compare_digest(self.password_hash(password, salt), stored_hash)
-        return matches and name == admin_name
+        _, salt, stored_hash = account
+        return compare_digest(self.password_hash(password, salt), stored_hash)
