@@ -1,6 +1,6 @@
 # 冯磊课题组网站
 
-`index.html` 是网站首页，也是 GitHub Pages 从 `main` 发布的入口。公开页面展示课题组介绍与链接。
+`index.html` 是网站首页，也是 GitHub Pages 从 `main` 发布的入口。GitHub Pages 展示课题组公开信息。本机服务在同一个首页提供组员和管理员登录，通过验证后显示组内资料。
 
 ## 本机运行
 
@@ -11,8 +11,7 @@ python build_lab_site.py
 python preview_server.py
 ```
 
-- [组员登录](http://127.0.0.1:8765/login)
-- [管理员登录](http://127.0.0.1:8765/admin/login)
+[打开本机首页](http://127.0.0.1:8765/)。在首页的「组员登录」区域登录，或点击「切换到管理员登录」。
 
 首次配置管理员时，在仓库根目录运行 `python preview_server.py --set-admin "冯磊"`，并在终端提示后输入密码。
 

@@ -23,20 +23,28 @@ COOKIE = 'lab_preview_session'
 SESSION_SECONDS = 30 * 60
 SESSIONS = {}
 LOGIN_ROLES = {'/login': 'student', '/admin/login': 'admin'}
+LOGIN_PAGES = {'student': '/#login', 'admin': '/?role=admin#login'}
 FAILED_ATTEMPTS = {role: deque() for role in LOGIN_ROLES.values()}
 STATE_LOCK = Lock()
-AUTHORED_FILES = {'/': ('index.html', 'text/html'), '/search.js': ('search.js', 'text/javascript')}
 LOGOUT_FORM = ('<form method="post" action="/logout">'
                '<button class="logout-button" type="submit">退出登录</button>'
                '</form>').encode('utf-8')
 ADMIN_LINK = '<a class="logout-button admin-link" href="/admin">管理账号</a>'.encode('utf-8')
 
 
+def replace_login_section(site, section):
+    start = site.index(b'<!-- LAB_LOGIN_START -->')
+    end_marker = b'<!-- LAB_LOGIN_END -->'
+    end = site.index(end_marker, start) + len(end_marker)
+    return site[:start] + section + site[end:]
+
+
 def authenticated_homepage(site, documents, role):
+    site = replace_login_section(site, b'')
     controls = ADMIN_LINK + LOGOUT_FORM if role == 'admin' else LOGOUT_FORM
     overrides = (
         ('<!-- LAB_HEAD -->', '<meta name="robots" content="noindex, nofollow">\n  <script src="search.js" defer></script>'),
-        ('<!-- LAB_NAV -->', '<a href="#lab-resources">组内资料</a>'),
+        ('<a class="lab-nav-link" href="#login">组内登录</a>', '<a class="lab-nav-link" href="#lab-resources">组内资料</a>'),
         ('<title>冯磊课题组</title>', '<title>冯磊课题组 · 组内资料</title>'),
         ('<template id="lab-resources">', '<div id="lab-resources">'),
         ('</template><!-- LAB_RESOURCES_END -->', '</div>'),
@@ -94,12 +102,12 @@ class RosterReader(HTMLParser):
             self.collecting = False
 
 
-def login_page(role='student', notice=''):
+def login_section(role, notice):
     admin = role == 'admin'
     title = '管理员登录' if admin else '组员登录'
-    description = '使用课题组管理员账号登录。' if admin else '输入登记的姓名和一卡通号，查看课题组资料。'
-    path = '/admin/login' if admin else '/login'
-    alternative = '<a href="/login">组员登录</a>' if admin else '<a href="/admin/login">管理员登录</a>'
+    description = '登录后可管理组员账号和查阅组内资料。' if admin else '使用登记的姓名和一卡通号访问组内资料。'
+    alternative = 'student' if admin else 'admin'
+    alternative_title = '切换到组员登录' if admin else '切换到管理员登录'
     field = (
         '<label for="password">密码</label>'
         '<input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>'
@@ -107,30 +115,20 @@ def login_page(role='student', notice=''):
         '<label for="card">一卡通号</label>'
         '<input id="card" name="card" type="password" inputmode="numeric" autocomplete="current-password" pattern="[0-9]+" maxlength="24" required>'
     )
-    return f'''<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>课题组资料登录</title>
-  <link rel="stylesheet" href="/site.css">
-</head>
-<body class="login-page">
-  <main class="login-card">
-    <p class="login-brand">SEU-PALM 冯磊课题组</p>
-    <h1>{title}</h1>
-    <p class="login-intro">{description}</p>
-    <form method="post" action="{path}" class="login-form">
+    return f'''<section class="login-section login-section-active wrap" id="login" aria-labelledby="login-title">
+    <div class="login-context">
+      <h2 id="login-title">{title}</h2>
+      <p>{description}</p>
+      <a class="login-alternative" href="{LOGIN_PAGES[alternative]}">{alternative_title}</a>
+    </div>
+    <form method="post" action="{LOGIN_PAGES[role]}" class="login-form">
       <label for="name">姓名</label>
       <input id="name" name="name" autocomplete="username" maxlength="40" required>
       {field}
       <button type="submit">登录</button>
       <p class="login-notice" role="status">{notice}</p>
     </form>
-    <p class="login-alternative">{alternative}</p>
-  </main>
-</body>
-</html>'''.encode('utf-8')
+  </section>'''.encode('utf-8')
 
 
 def admin_page(students):
@@ -233,15 +231,24 @@ class PreviewHandler(BaseHTTPRequestHandler):
                 return None
             return session
 
+    def homepage(self, session=None, role='student', status=HTTPStatus.OK, notice=''):
+        site = (ROOT / 'index.html').read_bytes()
+        if session:
+            site = authenticated_homepage(site, self.server.documents, session.role)
+        else:
+            site = replace_login_section(site, login_section(role, notice))
+        return self.answer(status, site)
+
     def do_GET(self):
         if not self.safe_host():
             return self.answer(HTTPStatus.BAD_REQUEST)
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         if path == '/site.css':
             return self.answer(HTTPStatus.OK, (ROOT / 'site.css').read_bytes(), 'text/css')
         if path == '/index.html':
             return self.answer(HTTPStatus.SEE_OTHER, redirect='/')
-        if path not in {*AUTHORED_FILES, *LOGIN_ROLES, '/admin'}:
+        if path not in {'/', '/search.js', '/admin', *LOGIN_ROLES}:
             return self.answer(HTTPStatus.NOT_FOUND)
         session = self.current_session()
         if path in LOGIN_ROLES:
@@ -249,20 +256,22 @@ class PreviewHandler(BaseHTTPRequestHandler):
             if session and session.role == role:
                 destination = '/admin' if role == 'admin' else '/'
                 return self.answer(HTTPStatus.SEE_OTHER, redirect=destination)
-            return self.answer(HTTPStatus.OK, login_page(role))
+            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES[role])
         if path == '/admin':
             if not session:
-                return self.answer(HTTPStatus.SEE_OTHER, redirect='/admin/login')
+                return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES['admin'])
             if session.role != 'admin':
                 return self.answer(HTTPStatus.FORBIDDEN)
             return self.answer(HTTPStatus.OK, admin_page(self.server.accounts.students()))
-        if not session:
-            return self.answer(HTTPStatus.SEE_OTHER, redirect='/login')
-        name, content_type = AUTHORED_FILES[path]
-        contents = (ROOT / name).read_bytes()
         if path == '/':
-            contents = authenticated_homepage(contents, self.server.documents, session.role)
-        return self.answer(HTTPStatus.OK, contents, content_type)
+            if url.query == 'role=admin':
+                if session and session.role == 'admin':
+                    return self.answer(HTTPStatus.SEE_OTHER, redirect='/admin')
+                return self.homepage(role='admin')
+            return self.homepage(session)
+        if not session:
+            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES['student'])
+        return self.answer(HTTPStatus.OK, (ROOT / 'search.js').read_bytes(), 'text/javascript')
 
     do_HEAD = do_GET
 
@@ -270,12 +279,13 @@ class PreviewHandler(BaseHTTPRequestHandler):
         origin = f'http://127.0.0.1:{self.server.server_port}'
         if not self.safe_host() or self.headers.get('Origin') != origin:
             return self.answer(HTTPStatus.FORBIDDEN)
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         if path == '/logout':
             with STATE_LOCK:
                 SESSIONS.pop(self.token(), None)
-            return self.answer(HTTPStatus.SEE_OTHER, redirect='/login', cookie='')
-        if path not in {*LOGIN_ROLES, '/admin/students'}:
+            return self.answer(HTTPStatus.SEE_OTHER, redirect=LOGIN_PAGES['student'], cookie='')
+        if path not in {'/', '/admin/students', *LOGIN_ROLES}:
             return self.answer(HTTPStatus.NOT_FOUND)
         size = self.headers.get('Content-Length', '')
         if not size.isascii() or not size.isdecimal() or len(size) > 4 or not 0 < int(size) <= 1024:
@@ -288,6 +298,8 @@ class PreviewHandler(BaseHTTPRequestHandler):
             return self.answer(HTTPStatus.BAD_REQUEST)
         if path == '/admin/students':
             return self.change_student_access(fields)
+        if path == '/':
+            return self.login('admin' if url.query == 'role=admin' else 'student', fields)
         return self.login(LOGIN_ROLES[path], fields)
 
     def change_student_access(self, fields):
@@ -353,7 +365,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
                     token = secrets.token_urlsafe(32)
                     SESSIONS[token] = Session(role, student_key, now + SESSION_SECONDS)
         if notice:
-            return self.answer(status, login_page(role, notice))
+            return self.homepage(role=role, status=status, notice=notice)
         return self.answer(status, redirect='/admin' if role == 'admin' else '/', cookie=token)
 
 
@@ -396,7 +408,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), PreviewHandler)
     server.accounts = accounts
     server.documents = documents
-    print(f'Local login preview: http://127.0.0.1:{server.server_port}/login ({len(roster.members)} enrolled)', flush=True)
+    print(f'Local site: http://127.0.0.1:{server.server_port}/ ({len(roster.members)} enrolled)', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

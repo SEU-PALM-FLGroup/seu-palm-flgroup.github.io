@@ -374,24 +374,23 @@ math[display="block"] { margin-block: .6rem; }
 }
 .site-footer p { margin: 0; }
 
-.login-page {
-  display: grid;
-  min-height: 100dvh;
-  place-items: center;
-  padding: 1rem;
-  background: radial-gradient(ellipse at 85% 12%, #206c69, transparent 65%), var(--hero);
-}
-
-.login-card {
-  width: min(100%, 30rem);
-  padding: clamp(1.4rem, 5vw, 2.6rem);
+.login-section {
+  margin-block: 1rem 2rem;
+  padding: clamp(1.1rem, 3.75vw, 2.4rem);
+  border: 1px solid var(--line);
   border-radius: .9rem;
   background: var(--paper);
 }
 
-.login-card h1 { margin: .55rem 0 0; font-size: clamp(1.85rem, 4.5vw, 2.5rem); }
-.login-brand { margin: 0; color: var(--teal); font-weight: 700; }
-.login-intro { margin: .7rem 0 1.4rem; color: var(--muted); line-height: 1.65; }
+.login-section-active {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 1.1rem clamp(1.5rem, 5vw, 4.5rem);
+}
+.login-context h2 { margin: 0; font-size: clamp(1.45rem, 3vw, 2rem); }
+.login-context p { margin: .6rem 0 0; color: var(--muted); line-height: 1.65; }
+.login-context .login-alternative { display: inline-block; margin-top: .85rem; }
 .login-form { display: grid; gap: .45rem; }
 .login-form label { font-weight: 650; }
 .login-form input, .login-form button, .logout-button {
@@ -408,7 +407,6 @@ math[display="block"] { margin-block: .6rem; }
 .login-form button:hover { background: #004b47; }
 .login-notice { margin: .3rem 0 0; color: #a3222b; }
 .login-notice:empty { display: none; }
-.login-alternative { margin: 1.1rem 0 0; }
 .logout-button { cursor: pointer; white-space: nowrap; }
 .logout-button:hover { background: var(--teal-light); }
 .account-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; }
@@ -436,6 +434,7 @@ math[display="block"] { margin-block: .6rem; }
 }
 
 @media (max-width: 40rem) {
+  .login-section-active { grid-template-columns: minmax(0, 1fr); }
   .wrap { width: calc(100% - 1.5rem); }
   .header-inner { flex-wrap: wrap; min-height: auto; }
   .site-nav { flex-basis: 100%; }
@@ -460,7 +459,7 @@ math[display="block"] { margin-block: .6rem; }
 @media print {
   :root, body { background: #fff; color: #000; }
   .wrap { width: 100%; }
-  .site-header, .hero, .quick-links, .search-panel, .contents-sidebar, .site-footer, .skip-link { display: none; }
+  .site-header, .hero, .login-section, .quick-links, .search-panel, .contents-sidebar, .site-footer, .skip-link { display: none; }
   .content-grid, .document-stack { display: block; margin: 0; }
   .document { padding: 0; border: 0; }
   .document + .document { break-before: page; }
