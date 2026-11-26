@@ -337,6 +337,17 @@ a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-vis
 .table-wrap thead th { background: #e7f2f3; color: #163d46; font-weight: 740; }
 .table-wrap tbody th { color: #163d46; font-weight: 700; }
 .members-table :is(th, td):nth-child(-n + 2) { white-space: nowrap; }
+
+.service-credit-progress { margin-block: 1.6rem 2rem; }
+.service-credit-progress th[scope="row"],
+.service-credit-progress td:nth-child(6) { white-space: nowrap; }
+.service-credit-progress progress {
+  inline-size: 4rem;
+  block-size: .65rem;
+  vertical-align: middle;
+  accent-color: var(--teal);
+}
+
 .table-wrap tbody tr:nth-child(even) { background: #f7fafb; }
 .table-wrap tbody tr > * { border-top: 1px solid #dbe5eb; }
 .table-wrap tr > * > :first-child { margin-top: 0; }

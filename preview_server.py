@@ -38,12 +38,15 @@ def replace_login_section(site, section):
     return site[:start] + section + site[end:]
 
 
-def authenticated_homepage(site, documents, role, watermark=None):
+def authenticated_homepage(site, documents, role, watermark=None, credit_progress=b''):
     site = replace_login_section(site, b'')
     controls = ADMIN_LINK + LOGOUT_FORM if role == 'admin' else LOGOUT_FORM
+    resources_link = '<a class="lab-nav-link" href="#lab-resources">组内资料</a>'
+    if credit_progress:
+        resources_link += '\n        <a href="#service-credit-progress">积分进度</a>'
     overrides = (
         ('<!-- LAB_HEAD -->', '<meta name="robots" content="noindex, nofollow">\n  <script src="search.js" defer></script>'),
-        ('<a class="lab-nav-link" href="#login">组内登录</a>', '<a class="lab-nav-link" href="#lab-resources">组内资料</a>'),
+        ('<a class="lab-nav-link" href="#login">组内登录</a>', resources_link),
         ('</title>', ' · 组内资料</title>'),
         ('<template id="lab-resources">', '<div id="lab-resources">'),
         ('</template><!-- LAB_RESOURCES_END -->', '</div>'),
@@ -58,7 +61,7 @@ def authenticated_homepage(site, documents, role, watermark=None):
     team_name = f'<span class="team-name" lang="en">{TEAM_NAME_HTML}</span>'.encode('utf-8')
     former_name = '冯磊课题组'.encode('utf-8')
     documents = re.sub(rb'(?:SEU-PALM )?' + former_name, team_name, documents)
-    return site.replace(b'<!-- LAB_DOCUMENTS -->', documents, 1)
+    return site.replace(b'<!-- LAB_DOCUMENTS -->', credit_progress + documents, 1)
 
 
 @dataclass(frozen=True)
@@ -143,9 +146,10 @@ def admin_page(students):
 
 
 class LabSite:
-    def __init__(self, accounts, documents, origin):
+    def __init__(self, accounts, documents, origin, credit_progress=b''):
         self.accounts = accounts
         self.documents = documents
+        self.credit_progress = credit_progress
         self.origin = origin
         self.host = urlsplit(origin).netloc
         self.secure = origin.startswith('https://')
@@ -204,7 +208,9 @@ class LabSite:
     def homepage(self, session=None, status=HTTPStatus.OK, notice='', extra=()):
         site = (ROOT / 'index.html').read_bytes()
         if session:
-            site = authenticated_homepage(site, self.documents, session.role, session.watermark)
+            site = authenticated_homepage(
+                site, self.documents, session.role, session.watermark, self.credit_progress
+            )
         else:
             site = replace_login_section(site, login_section(notice))
         return self.answer(status, site, extra=extra)
@@ -415,6 +421,8 @@ def main():
     documents = accounts.documents()
     if not documents:
         cli.error('Run build_lab_site.py to rebuild the private documents from the Word files.')
+    progress_file = data_dir / 'service-credit-progress.html'
+    credit_progress = progress_file.read_bytes() if progress_file.is_file() else b''
     if args.public_origin:
         try:
             from waitress import serve
@@ -422,7 +430,7 @@ def main():
             cli.error('Install the dependencies with python -m pip install -r requirements.txt.')
         print(f'Lab site: {args.public_origin}', flush=True)
         serve(
-            LabSite(accounts, documents, args.public_origin),
+            LabSite(accounts, documents, args.public_origin, credit_progress),
             host='127.0.0.1',
             port=args.port,
             trusted_proxy='127.0.0.1',
@@ -434,7 +442,7 @@ def main():
 
     with closing(make_server('127.0.0.1', args.port, None, handler_class=LocalRequestHandler)) as server:
         origin = f'http://127.0.0.1:{server.server_port}'
-        server.set_app(LabSite(accounts, documents, origin))
+        server.set_app(LabSite(accounts, documents, origin, credit_progress))
         print(f'Local site: {origin}/', flush=True)
         try:
             server.serve_forever()
