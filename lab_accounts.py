@@ -111,9 +111,12 @@ class Accounts:
                        (name, salt, password_hash))
 
     def verify_admin(self, name, password):
+        return self.verify_admin_salt(name, password) is not None
+
+    def verify_admin_salt(self, name, password):
         with self.connect() as db:
             account = db.execute('SELECT name, salt, password_hash FROM administrator WHERE id = 1').fetchone()
         if account is None or account[0] != name:
-            return False
+            return None
         _, salt, stored_hash = account
-        return compare_digest(self.password_hash(password, salt), stored_hash)
+        return salt if compare_digest(self.password_hash(password, salt), stored_hash) else None

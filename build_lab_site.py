@@ -239,6 +239,23 @@ def table_of_contents():
     return '\n'.join(links)
 
 
+def document_fragment(articles):
+    return '\n'.join([
+        '<div class="content-grid">',
+        '<aside class="contents-sidebar">',
+        '<nav class="toc" aria-labelledby="toc-label">',
+        '<p class="toc-label" id="toc-label">本页目录</p>',
+        table_of_contents(),
+        '</nav>',
+        '</aside>',
+        '<div class="document-stack">',
+        *articles,
+        '</div>',
+        '</div>',
+        '',
+    ])
+
+
 def main():
     parser = argparse.ArgumentParser(description='Import private lab documents and member accounts from Word files.')
     parser.add_argument('--source-dir', type=Path, default=DEFAULT_SOURCE_DIR,
@@ -268,23 +285,8 @@ def main():
         rendered.append(article)
         print(f'{key}: {dict(metrics)}')
 
-    fragment = '\n'.join([
-        '<div class="content-grid">',
-        '<aside class="contents-sidebar">',
-        '<nav class="toc" aria-labelledby="toc-label">',
-        '<p class="toc-label" id="toc-label">本页目录</p>',
-        table_of_contents(),
-        '</nav>',
-        '</aside>',
-        '<div class="document-stack">',
-        *rendered,
-        '</div>',
-        '</div>',
-        '',
-    ])
-
     data_dir.mkdir(parents=True, exist_ok=True)
-    Accounts(data_dir / 'lab_accounts.sqlite3').sync_roster(roster, fragment.encode('utf-8'))
+    Accounts(data_dir / 'lab_accounts.sqlite3').sync_roster(roster, document_fragment(rendered).encode('utf-8'))
     missing = sum(card_number is None for card_number in roster.values())
     print(f'Private resources imported for {len(roster)} members ({missing} card numbers missing from Word).')
 
